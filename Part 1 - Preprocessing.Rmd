@@ -1,0 +1,100 @@
+---
+title: "Part 1 - Preprocessing"
+author: "SrenBlikdal"
+date: "2024-04-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Preprocessing of WGBS data
+Here we present the steps for converting raw 150PE WGBS reads to input for a BSseq methylation analysis in R. The pipeline includes adapter removal, hard trimming of sequencing artifacts, mapping, deduplication, and methylation extraction.
+
+### QC, trimming and QC
+Firstly, we have a look the quality of the raw reads using fastqc
+
+```{bash eval=FALSE, include=TRUE}
+#fastqc - before trimming
+cd $raw_data/$SAMPLE
+fastqc "$SAMPLE"_1.fq.gz "$SAMPLE"_2.fq.gz -t 10 -o $out_direc/2_fastqc_before/$SAMPLE
+```
+
+Most concerning was the base distribution along the position in the read where all reads had a high proportion of Gs in the first 10 bases.
+```{r}
+knitr::include_graphics("~/Documents/Silversides_screenshots/Per_base_sequence_content_before.png") 
+```
+
+To make sure this technical artifact was remomed along with the trimming of adapters we specified clip_R2 -10 in trim_galore
+```{bash eval=FALSE, include=TRUE}
+cd $out_direc/3_trimgalore/$SAMPLE
+trim_galore -j 10  --path_to_cutadapt /projects/mjolnir1/apps/conda/cutadapt-3.7/bin/cutadapt --clip_R2 10 --three_prime_clip_R2 2 \
+--three_prime_clip_R1 2 --paired $raw_data/$SAMPLE/"$SAMPLE"_1.fq.gz $raw_data/$SAMPLE/"$SAMPLE"_2.fq.gz 
+```
+
+We check the quality of the reads after trimming and the issue with base distribution along the position in the read
+
+```{bash eval=FALSE, include=TRUE}
+# fastqc - after trimming
+cd $out_direc/3_trimgalore/$SAMPLE
+fastqc "$SAMPLE"_1.fq.gz "$SAMPLE"_2.fq.gz -t 10 -o $out_direc/4_fastqc_before/$SAMPLE
+```
+
+[image of base distribution along the file after trimming]
+
+```{r}
+knitr::include_graphics("~/Documents/Silversides_screenshots/Per_base_sequence_content_after.png") 
+```
+
+It looks a lot better and reads are ready to be mapped against the reference genome. 
+
+## Mapping
+Group specific reference genomes
+```{r}
+knitr::include_graphics("~/Downloads/Sample snps.png") 
+```
+
+### Bismark mapping 
+
+Map reads from each sample to the group specific reference genome ($ref_genome) using bismark 
+```{bash eval=FALSE, include=TRUE}
+#bismark
+#To increase the mapping rate
+#https://github.com/FelixKrueger/Bismark/blob/master/Docs/FAQ.md#issue-2-low-mapping-effiency-of-paired-end-bisulfite-seq-sample
+cd $out_direc/3_trimgalore/$SAMPLE
+bismark --parallel 6 --genome $ref_genome --output_dir $out_direc/5_bismark/$SAMPLE --score_min L,0,-0.6 -1 *_1.fq.gz -2 *_2.fq.gz
+```
+
+The mapped reads with exactly the same start and end position are likely PCR duplicates, and are removed from the bam file
+```{bash eval=FALSE, include=TRUE}
+# deduplication
+cd $out_direc/5_bismark/$SAMPLE
+deduplicate_bismark --paired --bam *bam
+```
+
+All the information about the methylation we need is stored in the deduplicated bam file, but for convenience we extract it to a format that is easier to work with in R. We use cytosine report format which has strand information which makes it possible to collapse the data from each strand of a CpG site which is assumed to be symmetrical. 
+
+```{bash eval=FALSE, include=TRUE}
+# methylation extraction (excluded "--counts"; excluded "--multi")
+cd $out_direc/5_bismark/$SAMPLE
+bismark_methylation_extractor -p --gzip --scaffolds --buffer_size 85% --parallel 6 --ignore 0 --ignore_3prime 0  --ignore_3prime_r2 0 --cytosine_report -o $out_direc/5_bismark/$SAMPLE --genome_folder $ref_genome  *deduplicated.bam
+```
+
+We use MultiQC to combine the reports from all samples
+```{bash eval=FALSE, include=TRUE}
+multiqc $out_direc/
+```
+
+One specific thing to be aware of is the that mean methylation level should be independent of the position in the read, ie. there is no m-bias.
+
+```{r}
+knitr::include_graphics("~/Documents/Silversides_screenshots/bismark_mbias_R1.png") 
+```
+
+```{r}
+knitr::include_graphics("~/Documents/Silversides_screenshots/bismark_mbias_R2.png") 
+```
+
+The joint multiQC report from the steps above for all 68 samples can be found [here](/projects/mjolnir1/Silversides/6_CpG_reports/multiqc_report.html)
+
